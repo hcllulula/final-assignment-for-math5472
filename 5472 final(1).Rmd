@@ -1,0 +1,1471 @@
+---
+title: "code for the 5472 final"
+author: "HE Changlin"
+date: "2024-12-07"
+output: pdf_document
+---
+# simulation
+
+Every observation has the same standard error, $\hat{\beta}_{i}|\beta_{j}\sim N(\beta_{i},1) \ and\  \hat{s}_{j}=s_{j}=1.$ and the z scores is $z_{j}:=\hat{\beta}_{j}/\hat{s}_{j}=\hat{\beta}_{j}$
+
+## basic try of the method
+directly generate the beta
+```{r}
+library(ashr)
+
+# 定义数据生成器函数
+rnormmix_datamaker = function(args){
+  pi0 = runif(1, args$min_pi0, args$max_pi0) # 随机生成真实零假设的比例
+
+  k = ncomp(args$g)
+  comp = sample(1:k, args$nsamp, mixprop(args$g), replace=TRUE) # 随机抽取一个组成部分
+  isnull = (runif(args$nsamp, 0, 1) < pi0)
+  beta = ifelse(isnull, 0, rnorm(args$nsamp, comp_mean(args$g)[comp], comp_sd(args$g)[comp]))
+  sebetahat = args$betahatsd
+  betahat = beta + rnorm(args$nsamp, 0, sebetahat)
+  meta = list(g1 = args$g, beta = beta, pi0 = pi0)
+  input = list(betahat = betahat, sebetahat = sebetahat, df = NULL)
+
+  data = list(meta = meta, input = input)
+
+  return(data)
+}
+
+# 定义参数
+args <- list(
+  nsamp = 1000, # 样本数量
+  g = normalmix(1, 0, 1), # 混合分布对象，单一正态分布 N(0,1)
+  min_pi0 = 0.75, # 真实零假设比例的最小值
+  max_pi0 = 0.8, # 真实零假设比例的最大值
+  betahatsd = 1 # betahat 的标准差
+)
+
+# 生成数据
+data <- rnormmix_datamaker(args)
+
+
+```
+### qvalue
+```{r}
+library(qvalue)
+
+# 生成 betahat 值
+betahat <- rnorm(10000, mean = 0, sd = sqrt(2))
+
+# 设置标准误差
+sebetahat <- rep(1, 10000)
+
+# 构建输入列表
+input <- list(betahat = betahat, sebetahat = sebetahat)
+
+# 定义 qvalue.wrapper 函数
+qvalue.wrapper = function(input){
+  zscore = input$betahat / input$sebetahat
+  pvalue = 2 * pnorm(-abs(zscore), lower.tail = TRUE)
+  res = qvalue(pvalue)
+  return(res)
+}
+
+# 计算 q 值
+output <- qvalue.wrapper(input)
+
+pvalues <- output$pvalues
+
+qvalue2pi0_est = function(output){
+  if(!is.list(output)){return(list(pi0_est=NA))} #deal with case where ERROR thrown
+  else{
+    return (list(pi0_est=output$pi0))
+  }
+}
+
+pi0_estimate <- qvalue2pi0_est(output)
+print(pi0_estimate)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# 假设 output$pvalues 和 output$lfdr 已经存在
+# output$pvalues <- p_values  # 你的 p 值向量
+# output$lfdr <- lfdr_values  # 你的 lfdr 向量
+
+# 创建数据框以便于绘图
+results_df <- data.frame(p_values = output$pvalues, lfdr = output$lfdr)
+
+# 定义 p 值区间的边界
+p_bins <- seq(0, 1, length.out = 81)  # 20个区间
+
+# 将 p 值分配到相应的区间
+results_df$bin <- cut(results_df$p_values, breaks = p_bins, include.lowest = TRUE, right = FALSE)
+
+# 计算每个 p 值区间的频数和平均 lfdr
+summary_df <- results_df %>%
+  group_by(bin) %>%
+  summarise(count = n(), mean_lfdr = mean(lfdr, na.rm = TRUE), .groups = 'drop')
+
+# 计算每个区间的 LFDR 下部和上部高度
+summary_df <- summary_df %>%
+  mutate(lower_height = count * (1 - mean_lfdr),  # 计算下部的高度
+         upper_height = count * mean_lfdr)      # 计算上部的高度
+
+# 绘制柱状图
+ggplot() +
+  geom_bar(data = summary_df, aes(x = bin, y = lower_height), stat = "identity", fill = "cyan") +  # 下部
+  geom_bar(data = summary_df, aes(x = bin, y = upper_height), stat = "identity", fill = "blue") +  # 上部
+  labs(title = "Histogram of P-values with Average LFDR", x = "P-value Bin", y = "Count") +
+  theme_minimal() +
+  theme(plot.margin = unit(c(1, 1, 1, 1), "cm"),
+        axis.text.x = element_blank()) +  # 隐藏 x 轴的文本
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))  # 调整 y 轴的扩展
+```
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# 假设 betahat 和 output$lfdr 已经存在
+# betahat <- c(...)  # 你的 betahat 向量
+# lfdr <- output$lfdr  # 你的 lfdr 向量
+
+# 创建数据框以便于绘图
+results_df <- data.frame(betahat = betahat, lfdr = 1-output$lfdr)
+
+# 定义 betahat 区间的边界
+b_bins <- seq(min(betahat), max(betahat), length.out = 81)  # 根据 betahat 的范围定义区间
+
+# 将 betahat 分配到相应的区间
+results_df$bin <- cut(results_df$betahat, breaks = b_bins, include.lowest = TRUE, right = FALSE)
+
+# 计算每个 betahat 区间的频数和平均 lfdr
+summary_df <- results_df %>%
+  group_by(bin) %>%
+  summarise(count = n(), mean_lfdr = mean(lfdr, na.rm = TRUE), .groups = 'drop')
+
+# 计算每个区间的 LFDR 下部和上部高度
+summary_df <- summary_df %>%
+  mutate(lower_height = count * (1 - mean_lfdr),  # 计算下部的高度
+         upper_height = count * mean_lfdr)      # 计算上部的高度
+
+# 绘制柱状图
+ggplot(summary_df, aes(x = bin)) +
+  geom_bar(aes(y = count), stat = "identity", fill = "cyan") +  # 绘制整个柱子
+  geom_bar(aes(y = upper_height), stat = "identity", fill = "blue") +  # 上部
+  labs(title = "Histogram of Betahat with Average LFDR", x = "Betahat Bin", y = "Count") +
+  theme_minimal() +
+  theme(plot.margin = unit(c(1, 1, 1, 1), "cm"),
+        axis.text.x = element_blank()) +  # 隐藏 x 轴的文本
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))  # 调整 y 轴的扩展
+```
+### locfdr
+```{r}
+library(locfdr)
+
+# 生成 betahat 值
+betahat <- rnorm(10000, mean = 0, sd = sqrt(2))
+
+# 设置标准误差
+sebetahat <- rep(1, 10000)
+
+# 计算 z 分数
+zscore <- betahat / sebetahat
+
+# 定义 locfdr.wrapper 函数
+locfdr.wrapper = function(zscore, args = NULL){
+  res = try(do.call(locfdr, args = c(list(zz = zscore, nulltype = 0, plot = 0), args)))
+  if(inherits(res, "try-error")){
+    res = list(fdr = rep(NA, length(zscore)), fp0 = matrix(NA, nrow = 6, ncol = 3))
+  }
+  return(res)
+}
+
+# 计算 locfdr
+output <- locfdr.wrapper(zscore)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# 假设 output$pvalues 和 output$lfdr 已经存在
+# output$pvalues <- p_values  # 你的 p 值向量
+# output$lfdr <- lfdr_values  # 你的 lfdr 向量
+
+# 创建数据框以便于绘图
+results_df <- data.frame(p_values = pvalues, lfdr = output$fdr)
+
+# 定义 p 值区间的边界
+p_bins <- seq(0, 1, length.out = 81)  # 20个区间
+
+# 将 p 值分配到相应的区间
+results_df$bin <- cut(results_df$p_values, breaks = p_bins, include.lowest = TRUE, right = FALSE)
+
+# 计算每个 p 值区间的频数和平均 lfdr
+summary_df <- results_df %>%
+  group_by(bin) %>%
+  summarise(count = n(), mean_lfdr = mean(lfdr, na.rm = TRUE), .groups = 'drop')
+
+# 计算每个区间的 LFDR 下部和上部高度
+summary_df <- summary_df %>%
+  mutate(lower_height = count * (1 - mean_lfdr),  # 计算下部的高度
+         upper_height = count * mean_lfdr)      # 计算上部的高度
+
+# 绘制柱状图
+ggplot() +
+    geom_bar(data = summary_df, aes(x = bin, y = upper_height), stat = "identity", fill = "cyan") +  # 上部
+  geom_bar(data = summary_df, aes(x = bin, y = lower_height), stat = "identity", fill = "blue") +  # 下部
+  labs(title = "Histogram of P-values with Average LFDR", x = "P-value Bin", y = "Count") +
+  theme_minimal() +
+  theme(plot.margin = unit(c(1, 1, 1, 1), "cm"),
+        axis.text.x = element_blank()) +  # 隐藏 x 轴的文本
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))  # 调整 y 轴的扩展
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# 假设 betahat 和 output$lfdr 已经存在
+# betahat <- c(...)  # 你的 betahat 向量
+# lfdr <- output$lfdr  # 你的 lfdr 向量
+
+# 创建数据框以便于绘图
+results_df <- data.frame(betahat = betahat, lfdr = 1-output$fdr)
+
+# 定义 betahat 区间的边界
+b_bins <- seq(min(betahat), max(betahat), length.out = 81)  # 根据 betahat 的范围定义区间
+
+# 将 betahat 分配到相应的区间
+results_df$bin <- cut(results_df$betahat, breaks = b_bins, include.lowest = TRUE, right = FALSE)
+
+# 计算每个 betahat 区间的频数和平均 lfdr
+summary_df <- results_df %>%
+  group_by(bin) %>%
+  summarise(count = n(), mean_lfdr = mean(lfdr, na.rm = TRUE), .groups = 'drop')
+
+# 计算每个区间的 LFDR 下部和上部高度
+summary_df <- summary_df %>%
+  mutate(lower_height = count * (1 - mean_lfdr),  # 计算下部的高度
+         upper_height = count * mean_lfdr)      # 计算上部的高度
+
+# 绘制柱状图
+ggplot(summary_df, aes(x = bin)) +
+  geom_bar(aes(y = count), stat = "identity", fill = "cyan") +  # 绘制整个柱子
+  geom_bar(aes(y = upper_height), stat = "identity", fill = "blue") +  # 上部
+  labs(title = "Histogram of Betahat with Average LFDR", x = "Betahat Bin", y = "Count") +
+  theme_minimal() +
+  theme(plot.margin = unit(c(1, 1, 1, 1), "cm"),
+        axis.text.x = element_blank()) +  # 隐藏 x 轴的文本
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))  # 调整 y 轴的扩展
+```
+
+
+### mixfdr
+```{r}
+library(mixfdr)
+
+# 生成 betahat 值
+betahat <- rnorm(10000, mean = 0, sd = sqrt(2))
+
+# 设置标准误差
+sebetahat <- rep(1, 10000)
+
+# 计算 z 分数
+zscore <- betahat / sebetahat
+
+# 定义 mixfdr.wrapper 函数
+mixfdr.wrapper=function(input,args=NULL){
+  res = try(do.call(mixFdr, args= c(list(x=input$betahat/input$sebetahat, noiseSD=NA, plots=FALSE),args)))
+  if(inherits(res,"try-error")){res=list(effectSize=rep(NA,length(input$betahat)),pi0_est=NA,pi=NA,mu=NA,sigma=NA,noiseSD=NA)}
+  return(list(res=res,input=input))
+}
+
+# 创建输入列表
+input_list <- list(betahat = betahat, sebetahat = sebetahat)
+
+# 调用 mixfdr.wrapper 函数
+output <- mixfdr.wrapper(input_list)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# 假设 output$pvalues 和 output$lfdr 已经存在
+# output$pvalues <- p_values  # 你的 p 值向量
+# output$lfdr <- lfdr_values  # 你的 lfdr 向量
+
+# 创建数据框以便于绘图
+results_df <- data.frame(p_values = pvalues, lfdr = output$res$fdr)
+
+# 定义 p 值区间的边界
+p_bins <- seq(0, 1, length.out = 81)  # 20个区间
+
+# 将 p 值分配到相应的区间
+results_df$bin <- cut(results_df$p_values, breaks = p_bins, include.lowest = TRUE, right = FALSE)
+
+# 计算每个 p 值区间的频数和平均 lfdr
+summary_df <- results_df %>%
+  group_by(bin) %>%
+  summarise(count = n(), mean_lfdr = mean(lfdr, na.rm = TRUE), .groups = 'drop')
+
+# 计算每个区间的 LFDR 下部和上部高度
+summary_df <- summary_df %>%
+  mutate(upper_height = count * (1 - mean_lfdr),  # 计算下部的高度
+         lower_height = count * mean_lfdr)      # 计算上部的高度
+
+# 绘制柱状图
+ggplot() +
+    geom_bar(data = summary_df, aes(x = bin, y = upper_height), stat = "identity", fill = "cyan") +  # 上部
+  geom_bar(data = summary_df, aes(x = bin, y = lower_height), stat = "identity", fill = "blue") +  # 下部
+  labs(title = "Histogram of P-values with Average LFDR", x = "P-value Bin", y = "Count") +
+  theme_minimal() +
+  theme(plot.margin = unit(c(1, 1, 1, 1), "cm"),
+        axis.text.x = element_blank()) +  # 隐藏 x 轴的文本
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))  # 调整 y 轴的扩展
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# 假设 betahat 和 output$lfdr 已经存在
+# betahat <- c(...)  # 你的 betahat 向量
+# lfdr <- output$lfdr  # 你的 lfdr 向量
+
+# 创建数据框以便于绘图
+results_df <- data.frame(betahat = betahat, lfdr = output$res$fdr)
+
+# 定义 betahat 区间的边界
+b_bins <- seq(min(betahat), max(betahat), length.out = 81)  # 根据 betahat 的范围定义区间
+
+# 将 betahat 分配到相应的区间
+results_df$bin <- cut(results_df$betahat, breaks = b_bins, include.lowest = TRUE, right = FALSE)
+
+# 计算每个 betahat 区间的频数和平均 lfdr
+summary_df <- results_df %>%
+  group_by(bin) %>%
+  summarise(count = n(), mean_lfdr = mean(lfdr, na.rm = TRUE), .groups = 'drop')
+
+# 计算每个区间的 LFDR 下部和上部高度
+summary_df <- summary_df %>%
+  mutate(lower_height = count * (1 - mean_lfdr),  # 计算下部的高度
+         upper_height = count * mean_lfdr)      # 计算上部的高度
+
+# 绘制柱状图
+ggplot(summary_df, aes(x = bin)) +
+  geom_bar(aes(y = count), stat = "identity", fill = "cyan") +  # 绘制整个柱子
+  geom_bar(aes(y = upper_height), stat = "identity", fill = "blue") +  # 上部
+  labs(title = "Histogram of Betahat with Average LFDR", x = "Betahat Bin", y = "Count") +
+  theme_minimal() +
+  theme(plot.margin = unit(c(1, 1, 1, 1), "cm"),
+        axis.text.x = element_blank()) +  # 隐藏 x 轴的文本
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))  # 调整 y 轴的扩展
+```
+### ash
+```{r}
+simple_ash <- function(betahat, sebetahat, pi0 = 0.5, mu1 = 0, sigma1 = 1, mu2 = 1, sigma2 = 1) {
+  # 计算 z-scores
+  z <- betahat / sebetahat
+
+  # 计算两个组分的密度
+  null_density <- dnorm(z, mean = mu1, sd = sigma1)
+  alt_density <- dnorm(z, mean = mu2, sd = sigma2)
+
+  # 计算后验概率属于null组分
+  post_prob_null <- pi0 * null_density / (pi0 * null_density + (1 - pi0) * alt_density)
+
+  # 计算收缩估计
+  shrinkage_estimates <- (1 - post_prob_null) * betahat
+
+  return(list(
+    shrinkage_estimates = shrinkage_estimates,
+    post_prob_null = post_prob_null
+  ))
+}
+
+# 生成 betahat 值
+betahat <- rnorm(10000, mean = 0, sd = sqrt(2))
+
+# 设置标准误差
+sebetahat <- rep(1, 10000)
+
+ash.wrapper = function(input, args = NULL) {
+  # 只传递 simple_ash 所需的参数
+  if (is.null(args)) {
+    args = list()  # 不再需要 mixcompdist 和 method
+  }
+  res = do.call(simple_ash, args = c(list(betahat = input$betahat, sebetahat = input$sebetahat), args))
+  return(res)
+}
+
+# 创建输入列表
+input_list <- list(betahat = betahat, sebetahat = sebetahat)
+
+# 调用 wrapper 函数
+output <- ash.wrapper(input_list)
+```
+
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# 假设 output$pvalues 和 output$lfdr 已经存在
+# output$pvalues <- p_values  # 你的 p 值向量
+# output$lfdr <- lfdr_values  # 你的 lfdr 向量
+
+# 创建数据框以便于绘图
+results_df <- data.frame(p_values = pvalues, lfdr = output$post_prob_null)
+
+# 定义 p 值区间的边界
+p_bins <- seq(0, 1, length.out = 81)  # 20个区间
+
+# 将 p 值分配到相应的区间
+results_df$bin <- cut(results_df$p_values, breaks = p_bins, include.lowest = TRUE, right = FALSE)
+
+# 计算每个 p 值区间的频数和平均 lfdr
+summary_df <- results_df %>%
+  group_by(bin) %>%
+  summarise(count = n(), mean_lfdr = mean(lfdr, na.rm = TRUE), .groups = 'drop')
+
+# 计算每个区间的 LFDR 下部和上部高度
+summary_df <- summary_df %>%
+  mutate(lower_height = count * (1 - mean_lfdr),  # 计算下部的高度
+         upper_height = count * mean_lfdr)      # 计算上部的高度
+
+# 绘制柱状图
+ggplot() +
+    geom_bar(data = summary_df, aes(x = bin, y = upper_height), stat = "identity", fill = "cyan") +  # 上部
+  geom_bar(data = summary_df, aes(x = bin, y = lower_height), stat = "identity", fill = "blue") +  # 下部
+  labs(title = "Histogram of P-values with Average LFDR", x = "P-value Bin", y = "Count") +
+  theme_minimal() +
+  theme(plot.margin = unit(c(1, 1, 1, 1), "cm"),
+        axis.text.x = element_blank()) +  # 隐藏 x 轴的文本
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))  # 调整 y 轴的扩展
+```
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# 假设 betahat 和 output$lfdr 已经存在
+# betahat <- c(...)  # 你的 betahat 向量
+# lfdr <- output$lfdr  # 你的 lfdr 向量
+
+# 创建数据框以便于绘图
+results_df <- data.frame(betahat = betahat, lfdr = output$post_prob_null)
+
+# 定义 betahat 区间的边界
+b_bins <- seq(min(betahat), max(betahat), length.out = 81)  # 根据 betahat 的范围定义区间
+
+# 将 betahat 分配到相应的区间
+results_df$bin <- cut(results_df$betahat, breaks = b_bins, include.lowest = TRUE, right = FALSE)
+
+# 计算每个 betahat 区间的频数和平均 lfdr
+summary_df <- results_df %>%
+  group_by(bin) %>%
+  summarise(count = n(), mean_lfdr = mean(lfdr, na.rm = TRUE), .groups = 'drop')
+
+# 计算每个区间的 LFDR 下部和上部高度
+summary_df <- summary_df %>%
+  mutate(lower_height = count * (1 - mean_lfdr),  # 计算下部的高度
+         upper_height = count * mean_lfdr)      # 计算上部的高度
+
+# 绘制柱状图
+ggplot(summary_df, aes(x = bin)) +
+  geom_bar(aes(y = count), stat = "identity", fill = "cyan") +  # 绘制整个柱子
+  geom_bar(aes(y = upper_height), stat = "identity", fill = "blue") +  # 上部
+  labs(title = "Histogram of Betahat with Average LFDR", x = "Betahat Bin", y = "Count") +
+  theme_minimal() +
+  theme(plot.margin = unit(c(1, 1, 1, 1), "cm"),
+        axis.text.x = element_blank()) +  # 隐藏 x 轴的文本
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))  # 调整 y 轴的扩展
+```
+
+
+
+```{r}
+library(ashr)
+# 生成 betahat 值
+betahat <- rnorm(10000, mean = 0, sd = sqrt(2))
+
+# 设置标准误差
+sebetahat <- rep(1, 10000)
+
+
+# 计算 z 分数
+zscore <- betahat / sebetahat
+
+ash.wrapper=function(input,args=NULL){
+  if(is.null(args)){
+    args=list(mixcompdist="halfuniform",method="fdr")
+  }
+  res = do.call(ash, args= c(list(betahat=input$betahat,sebetahat=input$sebetahat,df=input$df),args))
+  return(res)
+}
+
+# 创建输入列表
+input_list <- list(betahat = betahat, sebetahat = sebetahat)
+
+
+output <- ash.wrapper(input_list)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# 假设 output$pvalues 和 output$lfdr 已经存在
+# output$pvalues <- p_values  # 你的 p 值向量
+# output$lfdr <- lfdr_values  # 你的 lfdr 向量
+
+# 创建数据框以便于绘图
+results_df <- data.frame(p_values = pvalues, lfdr = output$result$lfdr)
+
+# 定义 p 值区间的边界
+p_bins <- seq(0, 1, length.out = 81)  # 20个区间
+
+# 将 p 值分配到相应的区间
+results_df$bin <- cut(results_df$p_values, breaks = p_bins, include.lowest = TRUE, right = FALSE)
+
+# 计算每个 p 值区间的频数和平均 lfdr
+summary_df <- results_df %>%
+  group_by(bin) %>%
+  summarise(count = n(), mean_lfdr = mean(lfdr, na.rm = TRUE), .groups = 'drop')
+
+# 计算每个区间的 LFDR 下部和上部高度
+summary_df <- summary_df %>%
+  mutate(upper_height = count * (1 - mean_lfdr),  # 计算下部的高度
+         lower_height = count * mean_lfdr)      # 计算上部的高度
+
+# 绘制柱状图
+ggplot() +
+    geom_bar(data = summary_df, aes(x = bin, y = upper_height), stat = "identity", fill = "cyan") +  # 上部
+  geom_bar(data = summary_df, aes(x = bin, y = lower_height), stat = "identity", fill = "blue") +  # 下部
+  labs(title = "Histogram of P-values with Average LFDR", x = "P-value Bin", y = "Count") +
+  theme_minimal() +
+  theme(plot.margin = unit(c(1, 1, 1, 1), "cm"),
+        axis.text.x = element_blank()) +  # 隐藏 x 轴的文本
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))  # 调整 y 轴的扩展
+```
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# 假设 betahat 和 output$lfdr 已经存在
+# betahat <- c(...)  # 你的 betahat 向量
+# lfdr <- output$lfdr  # 你的 lfdr 向量
+
+# 创建数据框以便于绘图
+results_df <- data.frame(betahat = betahat, lfdr = output$result$lfdr)
+
+# 定义 betahat 区间的边界
+b_bins <- seq(min(betahat), max(betahat), length.out = 81)  # 根据 betahat 的范围定义区间
+
+# 将 betahat 分配到相应的区间
+results_df$bin <- cut(results_df$betahat, breaks = b_bins, include.lowest = TRUE, right = FALSE)
+
+# 计算每个 betahat 区间的频数和平均 lfdr
+summary_df <- results_df %>%
+  group_by(bin) %>%
+  summarise(count = n(), mean_lfdr = mean(lfdr, na.rm = TRUE), .groups = 'drop')
+
+# 计算每个区间的 LFDR 下部和上部高度
+summary_df <- summary_df %>%
+  mutate(lower_height = count * (1 - mean_lfdr),  # 计算下部的高度
+         upper_height = count * mean_lfdr)      # 计算上部的高度
+
+# 绘制柱状图
+ggplot(summary_df, aes(x = bin)) +
+  geom_bar(aes(y = count), stat = "identity", fill = "cyan") +  # 绘制整个柱子
+  geom_bar(aes(y = upper_height), stat = "identity", fill = "blue") +  # 上部
+  labs(title = "Histogram of Betahat with Average LFDR", x = "Betahat Bin", y = "Count") +
+  theme_minimal() +
+  theme(plot.margin = unit(c(1, 1, 1, 1), "cm"),
+        axis.text.x = element_blank()) +  # 隐藏 x 轴的文本
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))  # 调整 y 轴的扩展
+```
+
+## 3.12
+
+### data generation
+```{r}
+# 加载所需的库
+library(ggplot2)
+library(patchwork)
+# 定义生成数据的函数
+generate_data <- function(scenario, n) {
+  # 生成一个均匀分布的随机数，用于选择分布
+  random_numbers <- runif(n)
+
+  # 根据场景生成数据
+  if (scenario == "spiky") {
+    # 将随机数分成不同区间，选择相应的分布
+    selected_distribution <- cut(random_numbers, 
+                                 breaks = c(-Inf, 1/5, 2/5, 4/5, 1), 
+                                 labels = c("dist1", "dist2", "dist3", "dist4"))
+    data <- numeric(n)  # 创建一个空的向量来存储数据
+    data[selected_distribution == "dist1"] <- rnorm(sum(selected_distribution == "dist1"), mean = 0, sd = 0.25)
+    data[selected_distribution == "dist2"] <- rnorm(sum(selected_distribution == "dist2"), mean = 0, sd = 0.5)
+    data[selected_distribution == "dist3"] <- rnorm(sum(selected_distribution == "dist3"), mean = 0, sd = 1)
+    data[selected_distribution == "dist4"] <- rnorm(sum(selected_distribution == "dist4"), mean = 0, sd = 2)
+    return(data)
+  }
+
+  if (scenario == "nearnormal") {
+    selected_distribution <- ifelse(random_numbers < 2/3, "dist1", "dist2")
+    data <- numeric(n)
+    data[selected_distribution == "dist1"] <- rnorm(sum(selected_distribution == "dist1"), mean = 0, sd = 1)
+    data[selected_distribution == "dist2"] <- rnorm(sum(selected_distribution == "dist2"), mean = 0, sd = 2)
+    return(data)
+  }
+
+  if (scenario == "flattop") {
+    selected_distribution <- cut(random_numbers, 
+                                 breaks = seq(0, 1, length.out = 8), 
+                                 labels = c("dist1", "dist2", "dist3", "dist4", "dist5", "dist6", "dist7"))
+    data <- numeric(n)
+    data[selected_distribution == "dist1"] <- rnorm(sum(selected_distribution == "dist1"), mean = -1.5, sd = 0.5)
+    data[selected_distribution == "dist2"] <- rnorm(sum(selected_distribution == "dist2"), mean = -1, sd = 0.5)
+    data[selected_distribution == "dist3"] <- rnorm(sum(selected_distribution == "dist3"), mean = -0.5, sd = 0.5)
+    data[selected_distribution == "dist4"] <- rnorm(sum(selected_distribution == "dist4"), mean = 0, sd = 0.5)
+    data[selected_distribution == "dist5"] <- rnorm(sum(selected_distribution == "dist5"), mean = 0.5, sd = 0.5)
+    data[selected_distribution == "dist6"] <- rnorm(sum(selected_distribution == "dist6"), mean = 1, sd = 0.5)
+    data[selected_distribution == "dist7"] <- rnorm(sum(selected_distribution == "dist7"), mean = 1.5, sd = 0.5)
+    return(data)
+  }
+
+  if (scenario == "skew") {
+    selected_distribution <- cut(random_numbers, 
+                                 breaks = c(-Inf, 1/4, 1/2, 5/6, 1), 
+                                 labels = c("dist1", "dist2", "dist3", "dist4"))
+    data <- numeric(n)
+    data[selected_distribution == "dist1"] <- rnorm(sum(selected_distribution == "dist1"), mean = -2, sd = 2)
+    data[selected_distribution == "dist2"] <- rnorm(sum(selected_distribution == "dist2"), mean = -1, sd = 1.5)
+    data[selected_distribution == "dist3"] <- rnorm(sum(selected_distribution == "dist3"), mean = 0, sd = 1)
+    data[selected_distribution == "dist4"] <- rnorm(sum(selected_distribution == "dist4"), mean = 1, sd = 1)
+    return(data)
+  }
+
+  if (scenario == "bignormal") {
+    return(rnorm(n, mean = 0, sd = 4))
+  }
+
+  if (scenario == "bimodal") {
+    selected_distribution <- ifelse(random_numbers < 0.5, "dist1", "dist2")
+    data <- numeric(n)
+    data[selected_distribution == "dist1"] <- rnorm(sum(selected_distribution == "dist1"), mean = -2, sd = 1)
+    data[selected_distribution == "dist2"] <- rnorm(sum(selected_distribution == "dist2"), mean = 2, sd = 1)
+    return(data)
+  }
+
+  stop("Unknown scenario")
+}
+
+# 生成并绘制数据
+plot_distribution <- function(scenario, n) {
+  data <- generate_data(scenario, n)
+
+  # 创建数据框
+  df <- data.frame(value = data, scenario = scenario)
+
+  # 绘制密度图
+  p <- ggplot(df, aes(x = value)) +
+    geom_density(fill = "blue", alpha = 0.5) +
+    labs(title = paste("Density Plot for", scenario),
+         x = "Value",
+         y = "Density") +
+    xlim(-6, 6) +  # 设置横轴范围
+    ylim(0, 0.75) +   # 设置纵轴范围，适当调整以适应你的数据
+    theme_minimal()
+
+  return(p)
+}
+
+# 设置样本大小
+n <- 10000
+
+# 定义场景列表
+scenarios <- c("spiky", "nearnormal", "flattop", "skew", "bignormal", "bimodal")
+
+# 生成所有图形
+plots <- lapply(scenarios, function(scenario) plot_distribution(scenario, n))
+
+# 使用 patchwork 包将图形组合在一起
+combined_plot <- wrap_plots(plots, ncol = 3)  # 设置每行的图形数量
+
+# 显示组合图形
+print(combined_plot)
+```
+
+生成数据，重复100次，一次生成1000个
+```{r}
+# 设置样本大小
+n <- 1000
+repetitions <- 100
+
+# 定义场景列表
+scenarios <- c("spiky", "nearnormal", "flattop", "skew", "bignormal", "bimodal")
+
+# 创建一个列表来存储 beta 和 esti_beta
+beta_list <- list()
+esti_beta_list <- list()
+
+# 设置 pi_0 的范围
+pi_0_values <- seq(0.01, 1, length.out = repetitions)
+
+# 循环生成数据
+for (scenario in scenarios) {
+  beta <- matrix(0, nrow = n, ncol = repetitions)  # 用于存储每个重复的 beta 值
+  esti_beta <- matrix(0, nrow = n, ncol = repetitions)  # 用于存储 esti_beta
+
+  # 生成 beta 值，根据场景
+  for (i in 1:repetitions) {
+    # 生成 beta，假设 beta 是根据场景生成的
+    beta[,i] <- pi_0_values[i] * generate_data(scenario, n)  # 生成原始的 beta 值
+
+    # 使用 pi_0 生成调整后的 beta
+    adjusted_beta <- beta[,i]  # 计算调整后的 beta
+
+    # 计算 esti_beta，均值为调整后的 beta，方差为 1
+    esti_beta[, i] <- adjusted_beta + rnorm(n, mean = 0, sd = 1)
+  }
+
+  beta_list[[scenario]] <- beta
+  esti_beta_list[[scenario]] <- esti_beta
+}
+
+```
+#### qvalue方法估计pi_0
+```{r}
+qvalue2pi0_est = function(output){
+  if(!is.list(output)){return(list(pi0_est=NA))} #deal with case where ERROR thrown
+  else{
+    return (list(pi0_est=output$pi0))
+  }
+}
+
+qvalue.wrapper = function(input,args=NULL){
+  zscore = input$betahat/input$sebetahat
+  pvalue = 2*pnorm(-abs(zscore),lower.tail=TRUE)
+  res = qvalue(pvalue)
+  return(res)
+}
+```
+
+```{r}
+library(qvalue)
+# 创建一个列表来存储 pi_0 的估计结果
+qvalue_pi_0_list <- list()
+
+# 循环估计 pi_0
+for (scenario in scenarios) {
+  pi_0_estimates <- numeric(repetitions)  # 存储每个场景的 pi_0 估计
+  for (i in 1:repetitions) {
+    input_data <- list(betahat = esti_beta_list[[scenario]][, i], sebetahat = rep(1, n))  # 假设 sebetahat 都为 1
+    output <- qvalue.wrapper(input_data)
+    pi_0_estimates[i] <- qvalue2pi0_est(output)$pi0_est
+  }
+  qvalue_pi_0_list[[scenario]] <- pi_0_estimates
+}
+
+```
+
+#### locfdr方法
+```{r}
+library(locfdr)
+
+locfdr.wrapper=function(input,args=NULL){
+  res = try(do.call(locfdr, args= c(list(zz=input$betahat/input$sebetahat, nulltype=0, plot=0),args)))
+  if(inherits(res,"try-error")){res=list(fdr=rep(NA,length(input$betahat)),fp0=matrix(NA,nrow=6,ncol=3))}
+  return(res)
+}
+
+
+locfdr2pi0_est = function(output){
+  return (list(pi0_est=output$fp0[1,3]))
+}
+```
+
+```{r}
+# 创建一个列表来存储 pi_0 的估计结果
+locfdr_pi_0_list <- list()
+
+# 循环估计 pi_0
+for (scenario in scenarios) {
+  locfdr_pi_0_estimates <- numeric(repetitions)  # 存储每个场景的 pi_0 估计
+  for (i in 1:repetitions) {
+    input_data <- list(betahat = esti_beta_list[[scenario]][, i], sebetahat = rep(1, n))  # 假设 sebetahat 都为 1
+    output <- locfdr.wrapper(input_data)
+    locfdr_pi_0_estimates[i] <- locfdr2pi0_est(output)$pi0_est
+  }
+  locfdr_pi_0_list[[scenario]] <- locfdr_pi_0_estimates
+}
+```
+
+#### mixfdr
+```{r}
+library(mixfdr)
+
+mixfdr.wrapper=function(input,args=NULL){
+  res = try(suppressWarnings(do.call(mixFdr, args= c(list(x=input$betahat/input$sebetahat, noiseSD=1, plots=FALSE),args))))
+  if(inherits(res,"try-error")){res=list(effectSize=rep(NA,length(input$betahat)),pi0_est=NA,pi=NA,mu=NA,sigma=NA,noiseSD=NA)}
+  return(list(res=res,input=input))
+}
+
+mixfdr2pi0_est = function(output){
+  return (list(pi0_est=output$res$pi[1]))
+}
+```
+
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+# 创建一个列表来存储 pi_0 的估计结果
+mixfdr_pi_0_list <- list()
+
+# 循环估计 pi_0
+for (scenario in scenarios) {
+  mixfdr_pi_0_estimates <- numeric(repetitions)  # 存储每个场景的 pi_0 估计
+
+  for (i in 1:repetitions) {
+    input_data <- list(betahat = esti_beta_list[[scenario]][, i], sebetahat = rep(1, n))  # 假设 sebetahat 都为 1
+    output <- mixfdr.wrapper(input_data)
+
+    # 估计 pi_0
+    mixfdr_pi_0_estimates[i] <- mixfdr2pi0_est(output)$pi0_est
+  }
+
+  mixfdr_pi_0_list[[scenario]] <- mixfdr_pi_0_estimates
+}
+
+```
+
+#### ash.n
+```{r}
+library(ashr)
+
+# ash.n 方法的 wrapper
+ash_n.wrapper = function(input, args=NULL) {
+  if (is.null(args)) {
+    args = list(mixcompdist="halfuniform", method="fdr")  # 使用 halfuniform 作为默认混合成分
+  }
+  res = try(do.call(ash, args = c(list(betahat=input$betahat, sebetahat=input$sebetahat), args)))
+  if (inherits(res, "try-error")) {
+    res = list(beta_est=rep(NA, length(input$betahat)), pi0_est=NA)
+  }
+  return(res)
+}
+
+# 从 ash.n 输出中提取 pi0 估计
+ash_n2pi0_est = function(output) {
+  return(list(pi0_est=get_pi0(output)))
+}
+
+# 创建一个列表来存储 ash.n 的 pi_0 估计结果
+ash_n_pi_0_list <- list()
+
+# 循环估计 pi_0
+for (scenario in scenarios) {
+  ash_n_pi_0_estimates <- numeric(repetitions)  # 存储每个场景的 pi_0 估计
+  for (i in 1:repetitions) {
+    input_data <- list(betahat = esti_beta_list[[scenario]][, i], sebetahat = rep(1, n))  # 假设 sebetahat 都为 1
+    output <- ash_n.wrapper(input_data)
+    ash_n_pi_0_estimates[i] <- ash_n2pi0_est(output)$pi0_est
+  }
+  ash_n_pi_0_list[[scenario]] <- ash_n_pi_0_estimates
+}
+```
+
+```{r}
+library(ashr)
+
+# ash.u 方法的 wrapper
+ash_u.wrapper = function(input, args=NULL) {
+  if (is.null(args)) {
+    args = list(mixcompdist="uniform", method="fdr")  # 使用 uniform 作为默认混合成分
+  }
+  res = try(do.call(ash, args = c(list(betahat=input$betahat, sebetahat=input$sebetahat), args)))
+  if (inherits(res, "try-error")) {
+    res = list(beta_est=rep(NA, length(input$betahat)), pi0_est=NA)
+  }
+  return(res)
+}
+
+# 从 ash.u 输出中提取 pi0 估计
+ash_u2pi0_est = function(output) {
+  return(list(pi0_est=get_pi0(output)))
+}
+
+# 创建一个列表来存储 ash.u 的 pi_0 估计结果
+ash_u_pi_0_list <- list()
+
+# 循环估计 pi_0
+for (scenario in scenarios) {
+  ash_u_pi_0_estimates <- numeric(repetitions)  # 存储每个场景的 pi_0 估计
+  for (i in 1:repetitions) {
+    input_data <- list(betahat = esti_beta_list[[scenario]][, i], sebetahat = rep(1, n))  # 假设 sebetahat 都为 1
+    output <- ash_u.wrapper(input_data)
+    ash_u_pi_0_estimates[i] <- ash_u2pi0_est(output)$pi0_est
+  }
+  ash_u_pi_0_list[[scenario]] <- ash_u_pi_0_estimates
+}
+```
+
+```{r}
+library(ggplot2)
+library(patchwork)
+
+# 创建绘图函数
+plot_pi0_estimates <- function(scenario) {
+  # 创建数据框
+  df <- data.frame(
+    repetition = rep(1:repetitions, 5),
+    pi0_est = c(
+      sort(qvalue_pi_0_list[[scenario]]), 
+      sort(locfdr_pi_0_list[[scenario]]), 
+      sort(mixfdr_pi_0_list[[scenario]]), 
+      sort(ash_n_pi_0_list[[scenario]]), 
+      sort(ash_u_pi_0_list[[scenario]])
+    ),
+    method = rep(c("qvalue", "locfdr", "mixfdr", "ash_n", "ash_u"), each = repetitions)
+  )
+
+  p <- ggplot(df, aes(x = repetition, y = pi0_est, color = method)) +
+  geom_point(alpha = 0.7) +  # 添加散点
+  geom_abline(intercept = 0, slope = 0.01) +  # 添加对角线，斜率为1，截距为0
+  labs(title = paste("pi_0 Estimates for", scenario),
+       x = "Repetition",
+       y = "Estimated pi_0") +
+  theme_minimal() +
+  ylim(0, 1)  # 假设 pi_0 的范围在 0 到 1 之间
+
+  return(p)
+}
+
+# 生成所有图形
+plots <- lapply(scenarios, plot_pi0_estimates)
+
+
+
+# 显示组合图形
+print(plots)
+```
+
+#### 对fdr进行估计
+```{r}
+# 设置样本大小
+n <- 1000
+repetitions <- 100
+
+# 定义场景列表
+scenarios <- c("spiky", "nearnormal", "flattop", "skew", "bignormal", "bimodal")
+
+# 创建一个列表来存储 beta 和 esti_beta
+beta_list <- list()
+esti_beta_list <- list()
+
+# 设置 pi_0 的范围
+pi_0_values <- seq(0.01, 1, length.out = repetitions)
+
+# 循环生成数据
+for (scenario in scenarios) {
+  beta <- matrix(0, nrow = n, ncol = repetitions)  # 用于存储每个重复的 beta 值
+  esti_beta <- matrix(0, nrow = n, ncol = repetitions)  # 用于存储 esti_beta
+
+  # 生成 beta 值，根据场景
+  for (i in 1:repetitions) {
+    # 生成 beta，假设 beta 是根据场景生成的
+    beta[,i] <- pi_0_values[i] * generate_data(scenario, n)  # 生成原始的 beta 值
+
+    # 使用 pi_0 生成调整后的 beta
+    adjusted_beta <- beta[,i]  # 计算调整后的 beta
+
+    # 计算 esti_beta，均值为调整后的 beta，方差为 1
+    esti_beta[, i] <- adjusted_beta + rnorm(n, mean = 0, sd = 1)
+  }
+
+  beta_list[[scenario]] <- beta
+  esti_beta_list[[scenario]] <- esti_beta
+}
+```
+
+```{r}
+fdrestimator_flattop <- function(beta,pi0){
+  fenzi <- pi0*1/7*(dnorm(beta,-1.5,0.5)+dnorm(beta,-1,0.5)+dnorm(beta,-0.5,0.5)+dnorm(beta,0.5,0.5)+dnorm(beta,1,0.5)+dnorm(beta,1.5,0.5))
+  fenmu <- 1-pi0+pi0*1/7*(dnorm(beta,-1.5,0.5)+dnorm(beta,-1,0.5)+dnorm(beta,-0.5,0.5)+dnorm(beta,0,0.5)+dnorm(beta,0.5,0.5)+dnorm(beta,1,0.5)+dnorm(beta,1.5,0.5))
+  rate <- fenzi/fenmu
+  return(rate)
+}
+```
+
+```{r}
+truelfdr_flattop<-data.frame(matrix(ncol = 100, nrow = 1000))
+
+flattop_esti_beta <- esti_beta_list[["flattop"]]
+for (i in 1:100){
+  pi0 = i*0.01
+  for (j in 1:1000){
+    truelfdr_flattop[j,i] = fdrestimator_flattop(flattop_esti_beta[j,i],pi0)
+  }
+}
+```
+
+
+```{r}
+estimated_lfdr_flattop <- data.frame(matrix(ncol = 100, nrow = 1000))
+
+for (i in 1:100) {
+  # 获取 betahat 和 sebetahat
+  betahat <- flattop_esti_beta[, i]
+  sebetahat <- rep(1, length(betahat))
+
+  # 使用 ash 估计 lfdr
+  input_list <- list(betahat = betahat, sebetahat = sebetahat)
+  ash_result <- ash.wrapper(input_list)
+
+  # 提取 lfdr
+  estimated_lfdr_flattop[, i] <- ash_result$result$lfdr
+}
+```
+
+```{r}
+library(tidyr)
+library(dplyr)
+
+# 将数据框转换为长格式，并添加标识列
+df_estimated <- as.data.frame(estimated_lfdr_flattop) %>%
+                pivot_longer(cols = everything(), names_to = "variable", values_to = "estimated_lfdr") %>%
+                mutate(id = row_number())
+
+df_true <- as.data.frame(truelfdr_flattop) %>%
+           pivot_longer(cols = everything(), names_to = "variable", values_to = "true_lfdr") %>%
+           mutate(id = row_number())
+
+# 合并数据框
+df_combined <- left_join(df_estimated, df_true, by = c("variable", "id"))
+
+ggplot(df_combined, aes(x = true_lfdr, y = estimated_lfdr)) +
+  geom_point(alpha = 0.4, color = "blue", size = 0.5) +  # 将 size 参数设置为更小的值
+  labs(x = "True LFDR", y = "Estimated LFDR", title = "Scatter plot of True vs. Estimated LFDR") +
+  theme_minimal()
+```
+skew
+```{r}
+fdrestimator_skew <- function(beta,pi0){
+  fenzi <- pi0*(1/4*dnorm(beta,-2,2)+1/4*dnorm(beta,-1,1.5)+1/6*dnorm(beta,1,1))
+  fenmu <- 1-pi0+pi0*(1/4*dnorm(beta,-2,2)+1/4*dnorm(beta,-1,1.5)+1/6*dnorm(beta,1,1)+1/3*dnorm(beta,0,1))
+  return(fenzi/fenmu)
+}
+```
+
+```{r}
+truelfdr_skew<-data.frame(matrix(ncol = 100, nrow = 1000))
+
+skew_esti_beta <- esti_beta_list[["skew"]]
+for (i in 1:100){
+  pi0 = i*0.01
+  for (j in 1:1000){
+    truelfdr_skew[j,i] = fdrestimator_skew(skew_esti_beta[j,i],pi0)
+  }
+}
+```
+
+
+```{r}
+estimated_lfdr_skew <- data.frame(matrix(ncol = 100, nrow = 1000))
+
+for (i in 1:100) {
+  # 获取 betahat 和 sebetahat
+  betahat <- skew_esti_beta[, i]
+  sebetahat <- rep(1, length(betahat))
+
+  # 使用 ash 估计 lfdr
+  input_list <- list(betahat = betahat, sebetahat = sebetahat)
+  ash_result <- ash.wrapper(input_list)
+
+  # 提取 lfdr
+  estimated_lfdr_skew[, i] <- ash_result$result$lfdr
+}
+```
+
+```{r}
+library(tidyr)
+library(dplyr)
+
+# 将数据框转换为长格式，并添加标识列
+df_estimated <- as.data.frame(estimated_lfdr_skew) %>%
+                pivot_longer(cols = everything(), names_to = "variable", values_to = "estimated_lfdr") %>%
+                mutate(id = row_number())
+
+df_true <- as.data.frame(truelfdr_skew) %>%
+           pivot_longer(cols = everything(), names_to = "variable", values_to = "true_lfdr") %>%
+           mutate(id = row_number())
+
+# 合并数据框
+df_combined <- left_join(df_estimated, df_true, by = c("variable", "id"))
+
+ggplot(df_combined, aes(x = true_lfdr, y = estimated_lfdr)) +
+  geom_point(alpha = 0.4, color = "blue", size = 0.5) +  # 将 size 参数设置为更小的值
+  labs(x = "True LFDR", y = "Estimated LFDR", title = "Scatter plot of True vs. Estimated LFDR") +
+  theme_minimal()
+```
+
+bio
+```{r}
+fdrestimator_bimodal <- function(beta,pi0){
+  fenzi <- pi0*(1/2*dnorm(beta,-2,1)+1/2*dnorm(beta,2,1))
+  fenmu <- 1-pi0+pi0*(1/2*dnorm(beta,-2,1)+1/2*dnorm(beta,2,1))
+  return(fenzi/fenmu)
+}
+
+truelfdr_bimodal <- data.frame(matrix(ncol = 100, nrow = 1000))
+
+bimodal_esti_beta <- esti_beta_list[["bimodal"]]
+for (i in 1:100){
+  pi0 = i*0.01
+  for (j in 1:1000){
+    truelfdr_bimodal[j,i] = fdrestimator_bimodal(bimodal_esti_beta[j,i],pi0)
+  }
+}
+
+estimated_lfdr_bimodal <- data.frame(matrix(ncol = 100, nrow = 1000))
+
+for (i in 1:100) {
+  # 获取 betahat 和 sebetahat
+  betahat <- bimodal_esti_beta[, i]
+  sebetahat <- rep(1, length(betahat))
+
+  # 使用 ash 估计 lfdr
+  input_list <- list(betahat = betahat, sebetahat = sebetahat)
+  ash_result <- ash.wrapper(input_list)
+
+  # 提取 lfdr
+  estimated_lfdr_bimodal[, i] <- ash_result$result$lfdr
+}
+
+library(tidyr)
+library(dplyr)
+
+# 将数据框转换为长格式，并添加标识列
+df_estimated <- as.data.frame(estimated_lfdr_bimodal) %>%
+                pivot_longer(cols = everything(), names_to = "variable", values_to = "estimated_lfdr") %>%
+                mutate(id = row_number())
+
+df_true <- as.data.frame(truelfdr_bimodal) %>%
+           pivot_longer(cols = everything(), names_to = "variable", values_to = "true_lfdr") %>%
+           mutate(id = row_number())
+
+# 合并数据框
+df_combined <- left_join(df_estimated, df_true, by = c("variable", "id"))
+
+ggplot(df_combined, aes(x = true_lfdr, y = estimated_lfdr)) +
+  geom_point(alpha = 0.4, color = "blue", size = 0.5) +  # 将 size 参数设置为更小的值
+  labs(x = "True LFDR", y = "Estimated LFDR", title = "Scatter plot of True vs. Estimated LFDR") +
+  theme_minimal()
+```
+
+#### g 的估计
+```{r}
+# 加载所需的库
+library(ggplot2)
+library(patchwork)
+
+# 定义生成数据的函数（保持不变）
+generate_data <- function(scenario, n) {
+  # 生成一个均匀分布的随机数，用于选择分布
+  random_numbers <- runif(n)
+
+  # 根据场景生成数据
+  if (scenario == "spiky") {
+    selected_distribution <- cut(random_numbers, 
+                                 breaks = c(-Inf, 1/5, 2/5, 4/5, 1), 
+                                 labels = c("dist1", "dist2", "dist3", "dist4"))
+    data <- numeric(n)
+    data[selected_distribution == "dist1"] <- rnorm(sum(selected_distribution == "dist1"), mean = 0, sd = 0.25)
+    data[selected_distribution == "dist2"] <- rnorm(sum(selected_distribution == "dist2"), mean = 0, sd = 0.5)
+    data[selected_distribution == "dist3"] <- rnorm(sum(selected_distribution == "dist3"), mean = 0, sd = 1)
+    data[selected_distribution == "dist4"] <- rnorm(sum(selected_distribution == "dist4"), mean = 0, sd = 2)
+    return(data)
+  }
+
+  if (scenario == "nearnormal") {
+    selected_distribution <- ifelse(random_numbers < 2/3, "dist1", "dist2")
+    data <- numeric(n)
+    data[selected_distribution == "dist1"] <- rnorm(sum(selected_distribution == "dist1"), mean = 0, sd = 1)
+    data[selected_distribution == "dist2"] <- rnorm(sum(selected_distribution == "dist2"), mean = 0, sd = 2)
+    return(data)
+  }
+
+  if (scenario == "flattop") {
+    selected_distribution <- cut(random_numbers, 
+                                 breaks = seq(0, 1, length.out = 8), 
+                                 labels = c("dist1", "dist2", "dist3", "dist4", "dist5", "dist6", "dist7"))
+    data <- numeric(n)
+    data[selected_distribution == "dist1"] <- rnorm(sum(selected_distribution == "dist1"), mean = -1.5, sd = 0.5)
+    data[selected_distribution == "dist2"] <- rnorm(sum(selected_distribution == "dist2"), mean = -1, sd = 0.5)
+    data[selected_distribution == "dist3"] <- rnorm(sum(selected_distribution == "dist3"), mean = -0.5, sd = 0.5)
+    data[selected_distribution == "dist4"] <- rnorm(sum(selected_distribution == "dist4"), mean = 0, sd = 0.5)
+    data[selected_distribution == "dist5"] <- rnorm(sum(selected_distribution == "dist5"), mean = 0.5, sd = 0.5)
+    data[selected_distribution == "dist6"] <- rnorm(sum(selected_distribution == "dist6"), mean = 1, sd = 0.5)
+    data[selected_distribution == "dist7"] <- rnorm(sum(selected_distribution == "dist7"), mean = 1.5, sd = 0.5)
+    return(data)
+  }
+
+  if (scenario == "skew") {
+    selected_distribution <- cut(random_numbers, 
+                                 breaks = c(-Inf, 1/4, 1/2, 5/6, 1), 
+                                 labels = c("dist1", "dist2", "dist3", "dist4"))
+    data <- numeric(n)
+    data[selected_distribution == "dist1"] <- rnorm(sum(selected_distribution == "dist1"), mean = -2, sd = 2)
+    data[selected_distribution == "dist2"] <- rnorm(sum(selected_distribution == "dist2"), mean = -1, sd = 1.5)
+    data[selected_distribution == "dist3"] <- rnorm(sum(selected_distribution == "dist3"), mean = 0, sd = 1)
+    data[selected_distribution == "dist4"] <- rnorm(sum(selected_distribution == "dist4"), mean = 1, sd = 1)
+    return(data)
+  }
+
+  if (scenario == "bignormal") {
+    return(rnorm(n, mean = 0, sd = 4))
+  }
+
+  if (scenario == "bimodal") {
+    selected_distribution <- ifelse(random_numbers < 0.5, "dist1", "dist2")
+    data <- numeric(n)
+    data[selected_distribution == "dist1"] <- rnorm(sum(selected_distribution == "dist1"), mean = -2, sd = 1)
+    data[selected_distribution == "dist2"] <- rnorm(sum(selected_distribution == "dist2"), mean = 2, sd = 1)
+    return(data)
+  }
+
+  stop("Unknown scenario")
+}
+
+# 生成并绘制数据
+plot_cumulative_distribution <- function(scenario, n) {
+  data <- generate_data(scenario, n)
+
+  # 创建数据框
+  df <- data.frame(value = data, scenario = scenario)
+
+  # 绘制累积分布图
+  p <- ggplot(df, aes(x = value)) +
+    stat_ecdf(geom = "step", color = "blue") +
+    labs(title = paste("Cumulative Distribution Plot for", scenario),
+         x = "Value",
+         y = "Cumulative Probability") +
+    xlim(-6, 6) +  # 设置横轴范围
+    ylim(0, 1) +   # 设置纵轴范围
+    theme_minimal()
+
+  return(p)
+}
+
+# 设置样本大小
+n <- 10000
+
+# 定义场景列表
+scenarios <- c("spiky", "nearnormal", "flattop", "skew", "bignormal", "bimodal")
+
+# 生成所有图形
+plots <- lapply(scenarios, function(scenario) plot_cumulative_distribution(scenario, n))
+
+# 使用 patchwork 包将图形组合在一起
+combined_plot <- wrap_plots(plots, ncol = 3)  # 设置每行的图形数量
+sebetahat <- rep(1,10000)
+# 显示组合图形
+print(combined_plot)
+```
+
+
+
+
+
+
+
+```{r}
+# 加载ashr包
+library(ashr)
+
+# 模拟一些数据
+set.seed(123)
+betahat <- rnorm(100)  # 估计值
+sebetahat <- abs(rnorm(100, 0, 1))  # 对应的标准误差
+
+# 使用ash函数
+ash_result <- ash(betahat, sebetahat, mixcompdist = "normal")
+
+# 查看结果
+print(ash_result)
+
+# 假设ash_result是之前ash函数返回的结果
+# 计算CDF值
+cdf_values <- cdf.ash(ash_result, at = seq(min(betahat), max(betahat), length.out = 100))
+
+# 绘制CDF图
+plot(cdf_values, type = "s", col = "blue", xlab = "Value", ylab = "CDF", main = "Estimated CDF using ashr")
+```
+
+
+
+#### 先跳过这个部分
+```{r}
+# 定义生成beta值的函数
+generate_beta <- function(n) {
+  set.seed(123) # 设置随机种子以确保结果可重复
+  beta <- ifelse(runif(n) < 0, 0, rnorm(n, mean = 0, sd = 1))
+  return(beta)
+}
+
+# 设置随机数的数量和重复次数
+n <- 1000
+num_simulations <- 100
+
+# 使用generate_beta函数生成两组随机数
+beta_group1 <- generate_beta(n)
+
+
+# 初始化向量以存储p值
+p_values_1 <- numeric(num_simulations)
+p_values_2 <- numeric(num_simulations)
+
+# 重复生成随机数并进行t检验
+for (i in 1:n) {
+  # 为第一组随机数生成N(beta, 1)的随机数并进行t检验
+  normal_group1 <- rnorm(num_simulations, mean = beta_group1[i], sd = 1)
+  p_values_1[i] <- t.test(normal_group1, mu = 0)$p.value
+  
+  # 为第二组随机数生成N(beta, 10)的随机数并进行t检验
+  normal_group2 <- rnorm(num_simulations, mean = beta_group1[i], sd = 10)
+  p_values_2[i] <- t.test(normal_group2, mu = 0)$p.value
+}
+
+# 输出p值的前几个以查看结果
+head(p_values_1)
+head(p_values_2)
+
+# 假设 p_values_1 和 p_values_2 已经生成并存储在向量中
+
+# 计算两个向量的直方图信息
+hist_info_1 <- hist(p_values_1, plot = FALSE)
+hist_info_2 <- hist(p_values_2, plot = FALSE)
+
+# 绘制柱状图
+barplot(c(hist_info_1$counts, hist_info_2$counts), 
+       names.arg = c(hist_info_1$mids, hist_info_2$mids), 
+       col = c(rep("blue", length(hist_info_1$counts)), rep("red", length(hist_info_2$counts))),
+       legend = TRUE, args.legend = list(x = "topright", legend = c("p_values_1", "p_values_2")),
+       main = "Comparison of p-values Distributions", xlab = "p-value", ylab = "Frequency")
+
+# 添加网格线以便更好地比较
+grid(nx = NULL, ny = NULL, col = "lightgray", lty = "dotted")
+```
+
+```{r}
+database <- generate_beta(1000)
+data1 <- c(1:1000)
+data2 <- c(1:1000)
+for (i in 1:1000){
+  data1[i] = rnorm(1,database[i],1)
+  data2[i] = 0.9*data1[i]+ 1/200*rnorm(1,database[i],10)
+}
+
+# 设置标准误差
+sebetahat1 <- rep(1, 1000)
+sebetahat2 <- rep(1, 1000)
+
+# 构建输入列表
+input1 <- list(betahat = data1, sebetahat = sebetahat1)
+input2 <- list(betahat = data2, sebetahat = sebetahat2)
+# 计算 q 值
+output1 <- qvalue.wrapper(input1)
+output2 <- qvalue.wrapper(input2)
+
+qvalues1 <- output1$qvalues
+qvalues2 <- output2$qvalues
+
+# 加载ggplot2包
+library(ggplot2)
+
+# 使用ggplot2绘制散点图
+ggplot(data.frame(qvalues1, qvalues2), aes(x = qvalues1, y = qvalues2)) +
+  geom_point(color = "blue") +  # 添加散点
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +  # 添加y=x的直线
+  labs(title = "Scatter Plot of q-values", x = "qvalues1", y = "qvalues2") +  # 添加标题和轴标签
+  theme_minimal()  # 使用简洁的主题
+
+```
+
+```{r}
+database <- generate_beta(1000)
+data1 <- c(1:1000)
+data2 <- c(1:1000)
+for (i in 1:1000){
+  data1[i] = rnorm(1,database[i],1)
+  data2[i] = 0.9*data1[i]+ 1/200*rnorm(1,database[i],10)
+}
+
+# 设置标准误差
+sebetahat1 <- rep(1, 1000)
+sebetahat2 <- rep(1, 1000)
+
+# 构建输入列表
+input1 <- data1/sebetahat1
+input2 <- data2/sebetahat2
+# 计算 q 值
+output1 <- locfdr.wrapper(input1)
+output2 <- locfdr.wrapper(input2)
+
+lfdr1 <- output1$fdr
+lfdr2 <- output2$fdr
+
+# 加载ggplot2包
+library(ggplot2)
+
+# 使用ggplot2绘制散点图
+ggplot(data.frame(lfdr1, lfdr2), aes(x = lfdr1, y = lfdr2)) +
+  geom_point(color = "blue") +  # 添加散点
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +  # 添加y=x的直线
+  labs(title = "Scatter Plot of lfdr", x = "lfdr1", y = "output2") +  # 添加标题和轴标签
+  theme_minimal()  # 使用简洁的主题
+
+```
+
+```{r}
+database <- generate_beta(1000)
+data1 <- c(1:1000)
+data2 <- c(1:1000)
+for (i in 1:1000){
+  data1[i] = rnorm(1,database[i],1)
+  data2[i] = data1[i]+ 1/200*rnorm(1,database[i],10)
+}
+
+# 设置标准误差
+sebetahat1 <- rep(1, 1000)
+sebetahat2 <- rep(1, 1000)
+
+# 构建输入列表
+input1 <- list(betahat = data1, sebetahat = sebetahat1)
+input2 <- list(betahat = data2, sebetahat = sebetahat2)
+# 计算 q 值
+output1 <- ash.wrapper(input1)
+output2 <- ash.wrapper(input2)
+
+lfsr1 <- output1$result$lfsr
+lfsr2 <- output2$result$lfsr
+
+# 加载ggplot2包
+library(ggplot2)
+
+# 使用ggplot2绘制散点图
+ggplot(data.frame(lfsr1, lfsr2), aes(x = lfsr1, y = lfsr2)) +
+  geom_point(color = "blue") +  # 添加散点
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +  # 添加y=x的直线
+  labs(title = "Scatter Plot of lfsr", x = "lfsr1", y = "lfsr2") +  # 添加标题和轴标签
+  theme_minimal()  # 使用简洁的主题
+```
+
+
+
